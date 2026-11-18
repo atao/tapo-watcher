@@ -1,0 +1,15 @@
+[Unit]
+Description=Move a Tapo C210 camera depending on whether phones are on the Wi-Fi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/tapo-watcher
+EnvironmentFile=%h/tapo-watcher/tapo.env
+# uv syncs .venv from uv.lock (--frozen: never update the lockfile) then runs the script
+ExecStart=%h/.local/bin/uv run --frozen tapo_watcher.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+# Secrets (camera credentials, phone MACs)
+tapo.env
+*.env
+!tapo.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Learned away delays (local runtime state)
+*.state.json
+*.state.json.tmp

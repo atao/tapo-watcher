@@ -1,0 +1,66 @@
+IP = "192.168.1.50"
+MAC = "aa:bb:cc:dd:ee:01"
+
+
+def test_connected_when_ping_answers(tp, net):
+    net.ping[IP] = True
+    net.neigh[IP] = f"dev eth0 lladdr {MAC} REACHABLE"
+    assert tp.phone_is_connected(IP, MAC)
+
+
+def test_connected_when_ping_ignored_but_arp_fresh(tp, net):
+    # Sleeping iPhone: ignores ICMP but answers ARP
+    net.neigh[IP] = f"dev eth0 lladdr {MAC} REACHABLE"
+    assert tp.phone_is_connected(IP, MAC)
+
+
+def test_away_when_arp_stale_or_failed(tp, net):
+    net.neigh[IP] = f"dev eth0 lladdr {MAC} STALE"
+    assert not tp.phone_is_connected(IP, MAC)
+    net.neigh[IP] = "dev eth0 FAILED"
+    assert not tp.phone_is_connected(IP, MAC)
+
+
+def test_away_when_ip_belongs_to_another_mac(tp, net):
+    net.ping[IP] = True
+    net.neigh[IP] = "dev eth0 lladdr 00:11:22:33:44:55 REACHABLE"
+    assert not tp.phone_is_connected(IP, MAC)
+
+
+def test_ip_from_mac_uses_arp_table_without_sweep(tp, net):
+    net.neigh["192.168.1.77"] = f"dev eth0 lladdr {MAC} STALE"
+    assert tp.ip_from_mac(MAC) == "192.168.1.77"
+    assert not net.swept
+
+
+def test_ip_from_mac_sweeps_when_unknown(tp, net):
+    assert tp.ip_from_mac(MAC) == ""
+    assert net.swept
+
+
+def test_ip_from_mac_ignores_failed_entries(tp, net):
+    net.neigh["192.168.1.77"] = f"dev eth0 lladdr {MAC} FAILED"
+    assert tp.ip_from_mac(MAC) == ""
+
+
+def test_phone_seen_follows_ip_change(tp, net):
+    new_ip = "192.168.1.88"
+    net.ping[new_ip] = True
+    net.neigh[new_ip] = f"dev eth0 lladdr {MAC} REACHABLE"
+
+    assert tp.phone_seen(IP, MAC)
+    assert tp._known_ip[MAC] == new_ip
+    # Next check goes straight to the new IP
+    assert tp.phone_seen(IP, MAC)
+
+
+def test_phone_seen_without_mac_does_not_search(tp, net):
+    assert not tp.phone_seen(IP, "")
+    assert not net.swept
+
+
+def test_any_phone_connected(tp, net, monkeypatch):
+    monkeypatch.setattr(tp, "PHONES", [(IP, MAC), ("192.168.1.51", "")])
+    assert not tp.any_phone_connected()
+    net.ping["192.168.1.51"] = True
+    assert tp.any_phone_connected()
