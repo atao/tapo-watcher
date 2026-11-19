@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Watch whether phones are connected to the local Wi-Fi and move a TP-Link
-Tapo C210 camera accordingly.
+Watch whether phones are connected to the local Wi-Fi and move one or more
+TP-Link Tapo C210 cameras accordingly.
 
   - at least one phone home  -> ACTION_HOME (e.g. turn the camera to the wall)
   - all phones away          -> ACTION_AWAY (e.g. turn back to the entrance)
 
-The action only runs when the state changes, not on every check.
+The action only runs when the state changes, not on every check. With several
+cameras (CAMERAS=name1,name2), each camera has its own settings
+(CAMERA_<NAME>_IP, ...) and a camera whose action failed is retried alone.
 
 Configured through environment variables (see tapo.env.example).
 
@@ -22,6 +24,7 @@ Usage:
   python3 tapo_watcher.py --check    # only print whether a phone is home
   python3 tapo_watcher.py --presets  # list the camera presets
   python3 tapo_watcher.py --stats    # show the learned away delay per phone
+  --camera NAME                      # limit --once / --presets to one camera
 
 Adaptive away delay:
   A sleeping iPhone can stay silent on the network for minutes. Every time a
@@ -41,6 +44,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 
 log = logging.getLogger("tapo-watcher")
 
@@ -100,12 +104,56 @@ def parse_phones():
     return phones
 
 
+@dataclass(frozen=True)
+class Camera:
+    name: str
+    ip: str
+    user: str
+    password: str
+    action_home: str
+    action_away: str
+
+
+def env_name(name: str) -> str:
+    """Camera name -> environment variable infix ("living-room" -> "LIVING_ROOM")."""
+    return re.sub(r"[^A-Z0-9]", "_", name.upper())
+
+
+def parse_cameras():
+    """CAMERAS="salon,entrance": one camera per name, configured with
+    CAMERA_<NAME>_IP / _USER / _PASSWORD / _ACTION_HOME / _ACTION_AWAY.
+    CAMERA_USER, CAMERA_PASSWORD, ACTION_HOME and ACTION_AWAY are the defaults
+    shared by all cameras. Without CAMERAS, a single camera is read from
+    CAMERA_IP (backward compatible)."""
+    user = env("CAMERA_USER", "admin")
+    password = env("CAMERA_PASSWORD", "")
+    home = env("ACTION_HOME", "preset:Home")
+    away = env("ACTION_AWAY", "preset:Away")
+    names = [n.strip() for n in env("CAMERAS", "").split(",") if n.strip()]
+    if not names:
+        return [Camera("camera", env("CAMERA_IP", required=True), user, password, home, away)]
+
+    cameras, seen = [], set()
+    for name in names:
+        prefix = f"CAMERA_{env_name(name)}_"
+        if prefix in seen:
+            sys.exit(f"Duplicate camera name in CAMERAS: {name}")
+        seen.add(prefix)
+        cameras.append(
+            Camera(
+                name,
+                env(prefix + "IP", required=True),
+                env(prefix + "USER", user),
+                env(prefix + "PASSWORD", password),
+                env(prefix + "ACTION_HOME", home),
+                env(prefix + "ACTION_AWAY", away),
+            )
+        )
+    return cameras
+
+
 PHONES = parse_phones()
-CAMERA_IP = env("CAMERA_IP", required=True)
-CAMERA_USER = env("CAMERA_USER", "admin")
-CAMERA_PASSWORD = env("CAMERA_PASSWORD", "")
-ACTION_HOME = env("ACTION_HOME", "preset:Home")
-ACTION_AWAY = env("ACTION_AWAY", "preset:Away")
+CAMERAS = parse_cameras()
 INTERVAL = int(env("INTERVAL", "30"))
 # Phones often turn Wi-Fi off while asleep: wait for several consecutive
 # failed checks before declaring them away.
@@ -227,8 +275,8 @@ class DelayLearner:
 def ip_from_mac(mac: str) -> str:
     """Find a phone's IP from its MAC in the ARP table.
 
-    If it is not there, ping the camera's whole /24 (in parallel, ~1 s) to
-    trigger ARP requests, then look again.
+    If it is not there, ping the whole /24 of each camera (in parallel, ~1 s)
+    to trigger ARP requests, then look again.
     """
 
     def lookup():
@@ -241,13 +289,14 @@ def ip_from_mac(mac: str) -> str:
     ip = lookup()
     if ip:
         return ip
-    prefix = CAMERA_IP.rsplit(".", 1)[0]
+    prefixes = dict.fromkeys(cam.ip.rsplit(".", 1)[0] for cam in CAMERAS)
     procs = [
         subprocess.Popen(
             ["ping", "-c", "1", "-W", "1", f"{prefix}.{i}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        for prefix in prefixes
         for i in range(1, 255)
     ]
     for proc in procs:
@@ -298,12 +347,29 @@ def phone_is_connected(ip: str, mac: str) -> bool:
 # --------------------------------------------------------------------------
 # Camera
 # --------------------------------------------------------------------------
-def camera():
+def tapo_class():
+    """pytapo's Tapo class, imported lazily so --check works without pytapo."""
     try:
         from pytapo import Tapo
     except ImportError:
         sys.exit("pytapo is not installed: run with `uv run tapo_watcher.py` (or `uv sync` first)")
-    return Tapo(CAMERA_IP, CAMERA_USER, CAMERA_PASSWORD)
+    return Tapo
+
+
+def camera(cam: Camera = None):
+    """Connect to `cam` (default: the first configured camera)."""
+    cam = cam or CAMERAS[0]
+    return tapo_class()(cam.ip, cam.user, cam.password)
+
+
+def select_cameras(name: str = None):
+    """All cameras, or only the one called `name`."""
+    if not name:
+        return CAMERAS
+    for cam in CAMERAS:
+        if cam.name.lower() == name.lower():
+            return [cam]
+    sys.exit(f"Unknown camera '{name}'. Configured: {', '.join(c.name for c in CAMERAS)}")
 
 
 def find_preset_id(tapo, wanted: str) -> str:
@@ -316,27 +382,28 @@ def find_preset_id(tapo, wanted: str) -> str:
     raise ValueError(f"Preset '{wanted}' not found. Available: {presets}")
 
 
-def run_action(action: str):
+def run_action(action: str, cam: Camera = None):
+    cam = cam or CAMERAS[0]
     action = action.strip()
     if not action or action == "none":
         return
     kind, _, arg = action.partition(":")
-    tapo = camera()
+    tapo = camera(cam)
 
     if kind == "preset":
         pid = find_preset_id(tapo, arg)
-        log.info("Camera -> preset %s (%s)", arg, pid)
+        log.info("Camera %s -> preset %s (%s)", cam.name, arg, pid)
         # Privacy mode blocks motion
         tapo.setPrivacyMode(False)
         tapo.setPreset(pid)
     elif kind == "move":
         x, y = (int(v) for v in arg.split(","))
-        log.info("Camera -> move x=%d y=%d", x, y)
+        log.info("Camera %s -> move x=%d y=%d", cam.name, x, y)
         tapo.setPrivacyMode(False)
         tapo.moveMotor(x, y)
     elif kind == "privacy":
         enabled = arg.lower() in ("on", "1", "true", "yes")
-        log.info("Camera -> privacy mode %s", "ON" if enabled else "OFF")
+        log.info("Camera %s -> privacy mode %s", cam.name, "ON" if enabled else "OFF")
         tapo.setPrivacyMode(enabled)
     else:
         raise ValueError(f"Unknown action: {action}")
@@ -345,13 +412,20 @@ def run_action(action: str):
 # --------------------------------------------------------------------------
 # Main loop
 # --------------------------------------------------------------------------
-def apply_state(home: bool):
+def apply_camera(cam: Camera, home: bool) -> bool:
+    """Run the home/away action of one camera. False if it failed."""
     try:
-        run_action(ACTION_HOME if home else ACTION_AWAY)
+        run_action(cam.action_home if home else cam.action_away, cam)
         return True
     except Exception as exc:  # camera unreachable, wrong password...
-        log.error("Camera action failed: %s", exc)
+        log.error("Camera %s: action failed: %s", cam.name, exc)
         return False
+
+
+def apply_state(home: bool, cameras=None) -> bool:
+    """Apply the state to every camera (all are tried). True if all succeeded."""
+    results = [apply_camera(cam, home) for cam in (cameras or CAMERAS)]
+    return all(results)
 
 
 def main():
@@ -360,6 +434,7 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--presets", action="store_true")
     parser.add_argument("--stats", action="store_true")
+    parser.add_argument("--camera", metavar="NAME", help="limit --once / --presets to one camera")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -369,7 +444,10 @@ def main():
         print(learner.stats())
         return
     if args.presets:
-        print(camera().getPresets())
+        cameras = select_cameras(args.camera)
+        for cam in cameras:
+            presets = camera(cam).getPresets()
+            print(f"{cam.name}: {presets}" if len(CAMERAS) > 1 else presets)
         return
     if args.check:
         present = any_phone_connected()
@@ -378,13 +456,15 @@ def main():
     if args.once:
         present = any_phone_connected()
         log.info("Phone %s", "connected" if present else "away")
-        sys.exit(0 if apply_state(present) else 1)
+        sys.exit(0 if apply_state(present, select_cameras(args.camera)) else 1)
 
-    camera()  # fail fast if pytapo is missing, not minutes later on first move
+    tapo_class()  # fail fast if pytapo is missing, not minutes later on first move
 
-    state = None  # unknown at startup -> apply the first state
+    state = None  # unknown at startup -> log the first state
+    cam_state = {cam.name: None for cam in CAMERAS}  # last state applied per camera
     last_seen = {}  # phone key -> time.monotonic() of the last answer
     log.info("Watching %s every %ds", ", ".join(ip for ip, _ in PHONES), INTERVAL)
+    log.info("Cameras: %s", ", ".join(f"{c.name} ({c.ip})" for c in CAMERAS))
     log.info("Away delay:\n%s", learner.stats())
     while True:
         now = time.monotonic()
@@ -407,9 +487,12 @@ def main():
 
         if present != state:
             log.info("Phone %s", "connected" if present else "away")
-            if apply_state(present):
-                state = present
-            # otherwise retry on the next iteration
+            state = present
+        for cam in CAMERAS:
+            # A failed camera is retried on the next iteration, the others
+            # are not moved again.
+            if cam_state[cam.name] != present and apply_camera(cam, present):
+                cam_state[cam.name] = present
 
         time.sleep(INTERVAL)
 

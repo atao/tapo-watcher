@@ -22,7 +22,7 @@ class FakeTapo:
 @pytest.fixture
 def cam(tp, monkeypatch):
     fake = FakeTapo()
-    monkeypatch.setattr(tp, "camera", lambda: fake)
+    monkeypatch.setattr(tp, "camera", lambda cam=None: fake)
     return fake
 
 
@@ -52,7 +52,7 @@ def test_privacy_action(tp, cam, arg, expected):
 
 @pytest.mark.parametrize("action", ["none", "", "  "])
 def test_none_action_does_not_touch_camera(tp, monkeypatch, action):
-    monkeypatch.setattr(tp, "camera", lambda: pytest.fail("camera() called"))
+    monkeypatch.setattr(tp, "camera", lambda cam=None: pytest.fail("camera() called"))
     tp.run_action(action)
 
 
@@ -62,7 +62,7 @@ def test_unknown_action_raises(tp, cam):
 
 
 def test_apply_state_reports_failure(tp, monkeypatch):
-    def boom():
+    def boom(cam=None):
         raise ConnectionError("camera unreachable")
 
     monkeypatch.setattr(tp, "camera", boom)
@@ -74,3 +74,51 @@ def test_apply_state_uses_home_and_away_actions(tp, cam):
     assert tp.apply_state(False)
     assert ("setPreset", "1") in cam.calls
     assert cam.calls[-1] == ("setPreset", "2")
+
+
+def two_cameras(tp, monkeypatch):
+    cams = [
+        tp.Camera("salon", "192.168.1.100", "u", "p", "preset:Home", "preset:Away"),
+        tp.Camera("garden", "192.168.2.100", "u", "p", "privacy:on", "preset:Away"),
+    ]
+    monkeypatch.setattr(tp, "CAMERAS", cams)
+    return cams
+
+
+def test_each_camera_gets_its_own_action(tp, monkeypatch):
+    two_cameras(tp, monkeypatch)
+    fakes = {"salon": FakeTapo(), "garden": FakeTapo()}
+    monkeypatch.setattr(tp, "camera", lambda cam=None: fakes[cam.name])
+
+    assert tp.apply_state(True)
+    assert fakes["salon"].calls == [("setPrivacyMode", False), ("setPreset", "1")]
+    assert fakes["garden"].calls == [("setPrivacyMode", True)]
+
+
+def test_apply_state_tries_every_camera_even_after_a_failure(tp, monkeypatch):
+    two_cameras(tp, monkeypatch)
+    garden = FakeTapo()
+
+    def connect(cam=None):
+        if cam.name == "salon":
+            raise ConnectionError("unreachable")
+        return garden
+
+    monkeypatch.setattr(tp, "camera", connect)
+    assert tp.apply_state(False) is False
+    assert garden.calls[-1] == ("setPreset", "2")
+
+
+def test_select_cameras(tp, monkeypatch):
+    cams = two_cameras(tp, monkeypatch)
+    assert tp.select_cameras(None) == cams
+    assert tp.select_cameras("GARDEN") == [cams[1]]
+    with pytest.raises(SystemExit):
+        tp.select_cameras("attic")
+
+
+def test_camera_connects_with_its_own_credentials(tp, monkeypatch):
+    cams = two_cameras(tp, monkeypatch)
+    monkeypatch.setattr(tp, "tapo_class", lambda: lambda ip, user, pw: (ip, user, pw))
+    assert tp.camera() == ("192.168.1.100", "u", "p")
+    assert tp.camera(cams[1]) == ("192.168.2.100", "u", "p")

@@ -5,7 +5,7 @@ Guidance for AI coding agents working on this repository.
 ## Project
 
 Single-file Python tool that detects phones on the home Wi-Fi (ping + ARP) and
-moves a TP-Link Tapo C210 camera via [pytapo](https://github.com/JurajNyiri/pytapo).
+moves one or more TP-Link Tapo C210 cameras via [pytapo](https://github.com/JurajNyiri/pytapo).
 See `README.md` for user-facing docs.
 
 ## Layout
@@ -13,6 +13,7 @@ See `README.md` for user-facing docs.
 | File | Purpose |
 | --- | --- |
 | `tapo_watcher.py` | The whole tool: config, phone detection, camera actions, main loop |
+| `install.sh` | Interactive install / uninstall of the systemd user service (writes `tapo.env`) |
 | `tapo.env.example` | Config template (committed, placeholder values only) |
 | `tapo.env` | Real config with credentials — **gitignored, never read aloud, commit or print** |
 | `tapo-watcher.service` | systemd user unit |
@@ -67,7 +68,7 @@ real `tapo.env` (use the `tp` / `net` fixtures and monkeypatch).
   Prefer `--check` and `--presets`; ask before moving the camera or overwriting
   presets.
 - **Network**: detection must stay passive-ish (UDP 5353 poke, ping, ARP read).
-  Do not add scans beyond the camera's /24 or anything requiring root.
+  Do not add scans beyond the cameras' /24 or anything requiring root.
 - **Dependencies**: managed with **uv** only — use `uv add` / `uv remove` /
   `uv lock`, never `pip install` or hand-editing `uv.lock`. Run Python through
   `uv run`. Standard library + `pytapo` only. `pytapo` is imported lazily
@@ -77,6 +78,11 @@ real `tapo.env` (use the `tp` / `net` fixtures and monkeypatch).
   expansion, quotes stripped). When adding one,
   update `tapo.env.example` and the table in `README.md`. Keep `PHONE_IP` /
   `PHONE_MAC` backward compatible.
+- **Cameras**: `CAMERAS` lists camera names, each configured with
+  `CAMERA_<NAME>_*` (falling back to the global `CAMERA_USER`,
+  `CAMERA_PASSWORD`, `ACTION_HOME`, `ACTION_AWAY`). Without `CAMERAS`, the
+  single `CAMERA_IP` camera must keep working. Phones are detected once per
+  loop for all cameras.
 - **Language**: everything in the repository is in English — code comments,
   docstrings, log messages, CLI output, config comments and docs.
 - **Phone identity is the MAC**: the IP in `PHONES` is only a starting hint.
@@ -86,8 +92,10 @@ real `tapo.env` (use the `tp` / `net` fixtures and monkeypatch).
 - **Adaptive away delay**: presence is time-based (`last_seen` per phone vs
   `DelayLearner.delay(key)`), not a miss counter. Only silences that end with
   the phone answering again and are `<= AWAY_MAX` may be learned.
-- **State changes only**: the camera must move only when presence changes, and a
-  failed action must be retried on the next loop (state not updated).
+- **State changes only**: a camera must move only when presence changes, and a
+  failed action must be retried on the next loop (state not updated). The
+  state is tracked per camera: a failure on one camera never moves the others
+  again.
 
 ## Git workflow
 

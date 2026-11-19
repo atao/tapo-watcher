@@ -7,18 +7,27 @@ class Stop(Exception):
     pass
 
 
-def run_loop(tp, monkeypatch, timeline, fail_actions=0):
-    """Run main() over `timeline` (one bool per check). Returns camera moves."""
+def run_loop(tp, monkeypatch, timeline, fail_actions=0, cameras=None):
+    """Run main() over `timeline` (one bool per check). Returns camera moves.
+
+    `fail_actions` maps a camera name to the number of actions that fail
+    (an int applies to the first camera)."""
+    cameras = cameras or [tp.Camera("cam", "192.168.1.100", "u", "p", "home", "away")]
     clock = [0.0]
     answers = iter(timeline)
     moves = []
-    failures = [fail_actions]
+    if isinstance(fail_actions, int):
+        fail_actions = {cameras[0].name: fail_actions}
+    failures = dict(fail_actions)
 
-    def apply_state(home):
-        if failures[0]:
-            failures[0] -= 1
+    def apply_camera(cam, home):
+        if failures.get(cam.name):
+            failures[cam.name] -= 1
             return False
-        moves.append((int(clock[0]), "HOME" if home else "AWAY"))
+        state = "HOME" if home else "AWAY"
+        moves.append(
+            (int(clock[0]), state) if len(cameras) == 1 else (int(clock[0]), cam.name, state)
+        )
         return True
 
     def sleep(seconds):
@@ -31,8 +40,9 @@ def run_loop(tp, monkeypatch, timeline, fail_actions=0):
             raise Stop from None
 
     monkeypatch.setattr(tp, "phone_seen", phone_seen)
-    monkeypatch.setattr(tp, "apply_state", apply_state)
-    monkeypatch.setattr(tp, "camera", lambda: None)
+    monkeypatch.setattr(tp, "apply_camera", apply_camera)
+    monkeypatch.setattr(tp, "tapo_class", lambda: None)
+    monkeypatch.setattr(tp, "CAMERAS", cameras)
     monkeypatch.setattr(tp.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(tp.time, "sleep", sleep)
     monkeypatch.setattr(tp, "PHONES", [("192.168.1.50", "aa:bb:cc:dd:ee:01")])
@@ -83,3 +93,26 @@ def test_long_absence_is_not_learned(tp, monkeypatch):
 def test_failed_camera_action_is_retried(tp, monkeypatch):
     moves = run_loop(tp, monkeypatch, [True, True, True], fail_actions=1)
     assert moves == [(30, "HOME")]
+
+
+def test_every_camera_moves_on_state_change(tp, monkeypatch):
+    cams = [
+        tp.Camera("salon", "192.168.1.100", "u", "p", "home", "away"),
+        tp.Camera("garden", "192.168.1.101", "u", "p", "home", "away"),
+    ]
+    moves = run_loop(tp, monkeypatch, [True, False, False, False], cameras=cams)
+    assert moves == [
+        (0, "salon", "HOME"),
+        (0, "garden", "HOME"),
+        (60, "salon", "AWAY"),
+        (60, "garden", "AWAY"),
+    ]
+
+
+def test_failed_camera_is_retried_alone(tp, monkeypatch):
+    cams = [
+        tp.Camera("salon", "192.168.1.100", "u", "p", "home", "away"),
+        tp.Camera("garden", "192.168.1.101", "u", "p", "home", "away"),
+    ]
+    moves = run_loop(tp, monkeypatch, [True, True, True], fail_actions={"garden": 1}, cameras=cams)
+    assert moves == [(0, "salon", "HOME"), (30, "garden", "HOME")]

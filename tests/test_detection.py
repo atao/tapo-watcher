@@ -64,3 +64,28 @@ def test_any_phone_connected(tp, net, monkeypatch):
     assert not tp.any_phone_connected()
     net.ping["192.168.1.51"] = True
     assert tp.any_phone_connected()
+
+
+def test_ip_from_mac_sweeps_each_camera_subnet_once(tp, net, monkeypatch):
+    monkeypatch.setattr(
+        tp,
+        "CAMERAS",
+        [
+            tp.Camera("a", "192.168.1.100", "u", "p", "none", "none"),
+            tp.Camera("b", "192.168.1.101", "u", "p", "none", "none"),
+            tp.Camera("c", "10.0.0.5", "u", "p", "none", "none"),
+        ],
+    )
+    pinged = []
+
+    class Popen:
+        def __init__(self, cmd, **kwargs):
+            pinged.append(cmd[-1])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(tp.subprocess, "Popen", Popen)
+    tp.ip_from_mac(MAC)
+    assert len(pinged) == 2 * 254
+    assert {ip.rsplit(".", 1)[0] for ip in pinged} == {"192.168.1", "10.0.0"}

@@ -64,3 +64,67 @@ def test_parse_phones_missing_exits(tp, monkeypatch):
     monkeypatch.delenv("PHONE_IP", raising=False)
     with pytest.raises(SystemExit):
         tp.parse_phones()
+
+
+CAMERA_VARS = [
+    "CAMERAS",
+    "CAMERA_IP",
+    "CAMERA_USER",
+    "CAMERA_PASSWORD",
+    "ACTION_HOME",
+    "ACTION_AWAY",
+]
+
+
+def clear_camera_env(monkeypatch):
+    import os
+
+    for key in list(os.environ):
+        if key in CAMERA_VARS or key.startswith("CAMERA_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_parse_cameras_legacy_single_camera(tp, monkeypatch):
+    clear_camera_env(monkeypatch)
+    monkeypatch.setenv("CAMERA_IP", "192.168.1.100")
+    monkeypatch.setenv("CAMERA_PASSWORD", "$ecret")
+    assert tp.parse_cameras() == [
+        tp.Camera("camera", "192.168.1.100", "admin", "$ecret", "preset:Home", "preset:Away")
+    ]
+
+
+def test_parse_cameras_list_with_shared_defaults(tp, monkeypatch):
+    clear_camera_env(monkeypatch)
+    monkeypatch.setenv("CAMERAS", " salon , living-room ")
+    monkeypatch.setenv("CAMERA_USER", "shared")
+    monkeypatch.setenv("CAMERA_PASSWORD", "shared-pw")
+    monkeypatch.setenv("ACTION_AWAY", "preset:Door")
+    monkeypatch.setenv("CAMERA_SALON_IP", "192.168.1.100")
+    monkeypatch.setenv("CAMERA_LIVING_ROOM_IP", "192.168.1.101")
+    monkeypatch.setenv("CAMERA_LIVING_ROOM_PASSWORD", "own-pw")
+    monkeypatch.setenv("CAMERA_LIVING_ROOM_ACTION_HOME", "privacy:on")
+    assert tp.parse_cameras() == [
+        tp.Camera("salon", "192.168.1.100", "shared", "shared-pw", "preset:Home", "preset:Door"),
+        tp.Camera("living-room", "192.168.1.101", "shared", "own-pw", "privacy:on", "preset:Door"),
+    ]
+
+
+def test_parse_cameras_missing_ip_exits(tp, monkeypatch):
+    clear_camera_env(monkeypatch)
+    monkeypatch.setenv("CAMERAS", "salon")
+    with pytest.raises(SystemExit, match="CAMERA_SALON_IP"):
+        tp.parse_cameras()
+
+
+def test_parse_cameras_duplicate_name_exits(tp, monkeypatch):
+    clear_camera_env(monkeypatch)
+    monkeypatch.setenv("CAMERAS", "salon,SALON")
+    monkeypatch.setenv("CAMERA_SALON_IP", "192.168.1.100")
+    with pytest.raises(SystemExit, match="Duplicate"):
+        tp.parse_cameras()
+
+
+def test_parse_cameras_without_any_camera_exits(tp, monkeypatch):
+    clear_camera_env(monkeypatch)
+    with pytest.raises(SystemExit, match="CAMERA_IP"):
+        tp.parse_cameras()

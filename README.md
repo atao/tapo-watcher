@@ -2,13 +2,14 @@
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-Moves a TP-Link Tapo C210 camera depending on whether your phones are
-connected to the home Wi-Fi.
+Moves one or more TP-Link Tapo C210 cameras depending on whether your phones
+are connected to the home Wi-Fi.
 
 - At least one phone at home → camera goes to `ACTION_HOME` (e.g. a preset facing a wall)
 - All phones away → camera goes to `ACTION_AWAY` (e.g. a preset facing the entrance)
 
-The camera only moves when the state changes, not on every check.
+The cameras only move when the state changes, not on every check. Each camera
+can have its own actions (see [Several cameras](#several-cameras)).
 
 ## How detection works
 
@@ -23,7 +24,7 @@ Every `INTERVAL` seconds, for each phone in `PHONES`:
 **The IP follows the MAC.** A phone is identified by its MAC; the IP in
 `PHONES` is only a starting hint. If the phone is not found at its last known
 IP (DHCP gave it a new one, or no IP was configured), the script looks the MAC
-up in the ARP table — pinging the camera's /24 first if needed — and remembers
+up in the ARP table — pinging the cameras' /24 first if needed — and remembers
 the new IP (logged as `new IP`). `tapo.env` is never rewritten.
 
 ### Adaptive away delay
@@ -75,7 +76,8 @@ In the Tapo app:
 
 - Create a **camera account**: Camera → Settings → Advanced Settings → Camera Account.
 - Create the presets used by `ACTION_HOME` / `ACTION_AWAY`, or save the current
-  position from the command line:
+  position from the command line (`tp.camera()` is the first camera; use
+  `tp.camera(tp.select_cameras('salon')[0])` for another one):
 
 ```bash
 uv run python -c "import tapo_watcher as tp; print(tp.camera().savePreset('Away'))"
@@ -94,11 +96,12 @@ uv run python -c "import tapo_watcher as tp; print(tp.camera().savePreset('Away'
 | Variable | Description | Default |
 | --- | --- | --- |
 | `PHONES` | Comma-separated `ip=mac` list. IP or MAC may be omitted (`=mac`, `ip=`). | required |
-| `CAMERA_IP` | Camera IP address | required |
-| `CAMERA_USER` | Camera account username | `admin` |
-| `CAMERA_PASSWORD` | Camera account password. Wrap in single quotes if it contains `$`. | |
-| `ACTION_HOME` | Action when a phone is home | `preset:Home` |
-| `ACTION_AWAY` | Action when all phones are away | `preset:Away` |
+| `CAMERA_IP` | Camera IP address (single camera, ignored when `CAMERAS` is set) | required |
+| `CAMERA_USER` | Camera account username (default for every camera) | `admin` |
+| `CAMERA_PASSWORD` | Camera account password (default for every camera). Wrap in single quotes if it contains `$`. | |
+| `ACTION_HOME` | Action when a phone is home (default for every camera) | `preset:Home` |
+| `ACTION_AWAY` | Action when all phones are away (default for every camera) | `preset:Away` |
+| `CAMERAS` | Comma-separated camera names, for several cameras (see below) | |
 | `INTERVAL` | Seconds between checks | `30` |
 | `AWAY_AFTER_MISSES` | Failed checks before "away" (fixed delay, or until enough silences are learned) | `6` |
 | `ADAPTIVE_DELAY` | Learn the away delay per phone (`1`/`0`) | `1` |
@@ -109,6 +112,33 @@ uv run python -c "import tapo_watcher as tp; print(tp.camera().savePreset('Away'
 | `STATE_FILE` | Where learned silences are stored | `tapo-watcher.state.json` |
 
 `PHONE_IP` / `PHONE_MAC` are still accepted for a single phone.
+
+### Several cameras
+
+List the camera names in `CAMERAS`, then configure each one with variables
+named after it (`<NAME>` = name in upper case, non-alphanumerics replaced by
+`_`, so `living-room` → `LIVING_ROOM`):
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `CAMERA_<NAME>_IP` | Camera IP address | required |
+| `CAMERA_<NAME>_USER` | Camera account username | `CAMERA_USER` |
+| `CAMERA_<NAME>_PASSWORD` | Camera account password | `CAMERA_PASSWORD` |
+| `CAMERA_<NAME>_ACTION_HOME` | Action when a phone is home | `ACTION_HOME` |
+| `CAMERA_<NAME>_ACTION_AWAY` | Action when all phones are away | `ACTION_AWAY` |
+
+```bash
+CAMERAS=salon,entrance
+CAMERA_PASSWORD='shared-password'
+CAMERA_SALON_IP=192.168.1.100
+CAMERA_ENTRANCE_IP=192.168.1.101
+CAMERA_ENTRANCE_ACTION_HOME=privacy:on
+CAMERA_ENTRANCE_ACTION_AWAY=privacy:off
+```
+
+Phones are checked once per loop for all cameras. Every camera is tried on
+each state change; if one fails (unreachable, wrong password…), only that one
+is retried on the next check — the others are not moved again.
 
 **Actions:**
 
@@ -127,8 +157,9 @@ to load another file.
 
 ```bash
 uv run tapo_watcher.py --check     # print whether a phone is connected
-uv run tapo_watcher.py --presets   # list camera presets
-uv run tapo_watcher.py --once      # one check + action
+uv run tapo_watcher.py --presets   # list camera presets (every camera)
+uv run tapo_watcher.py --presets --camera salon   # one camera only
+uv run tapo_watcher.py --once      # one check + action (add --camera NAME for one camera)
 uv run tapo_watcher.py --stats     # learned away delay per phone
 uv run tapo_watcher.py             # run forever
 ```
@@ -155,7 +186,16 @@ GitHub Actions (`.github/workflows/ci.yml`) runs ruff and the tests on Python
 
 ## Run as a service
 
-`tapo-watcher.service` is a systemd user unit running `uv run --frozen`
+The interactive installer asks for the cameras, phones and actions, writes
+`tapo.env` (mode 600), tests detection and the camera connection, then installs
+and starts the systemd user unit with the right paths:
+
+```bash
+./install.sh install     # or ./install.sh for a menu
+./install.sh uninstall   # stops and removes the service, asks before deleting tapo.env / state
+```
+
+To do it by hand: `tapo-watcher.service` is a systemd user unit running `uv run --frozen`
 (edit the paths if the project is not in `~/tapo-watcher` or uv is
 not in `~/.local/bin`):
 
@@ -183,3 +223,6 @@ sudo loginctl enable-linger "$USER"
   TP-Link cloud email.
 - **Camera does not move**: privacy mode blocks motion; `preset:` and `move:`
   turn it off automatically.
+- **One camera out of several does not move**: the logs show
+  `Camera <name>: action failed`; it is retried on every check. Test it alone
+  with `uv run tapo_watcher.py --presets --camera <name>`.
