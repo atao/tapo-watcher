@@ -81,7 +81,7 @@ def test_learns_sleep_pattern_and_stops_false_departures(tp, monkeypatch):
     false_departures = [m for m in moves[:-1] if m[1] == "AWAY"]
     assert len(false_departures) == 5  # learning phase (ADAPTIVE_MIN_SAMPLES)
     assert moves[-1][1] == "AWAY"  # the real departure is still detected
-    assert tp.DelayLearner(tp.STATE_FILE).delay("aa:bb:cc:dd:ee:01") == 180
+    assert tp.DelayLearner(tp.STATE_FILE).delay("aa:bb:cc:dd:ee:01") == 210
 
 
 def test_long_absence_is_not_learned(tp, monkeypatch):

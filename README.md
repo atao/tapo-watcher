@@ -106,7 +106,8 @@ Then follow it with `journalctl --user -u tapo-watcher -f`.
 
 **Reconfigure:** run `./install.sh` again. The current values are offered as
 defaults, the previous file is kept as `tapo.env.bak`, and advanced settings
-(`AWAY_MIN`, `AWAY_MAX`, `ADAPTIVE_MARGIN`, `ADAPTIVE_MIN_SAMPLES`,
+(`AWAY_MIN`, `AWAY_MAX`, `ADAPTIVE_MARGIN`, `ADAPTIVE_EXTRA_CHECKS`,
+`ADAPTIVE_MIN_SAMPLES`,
 `STATE_FILE`) are preserved.
 
 **Uninstall:**
@@ -164,6 +165,7 @@ and `TAPO_ENV_FILE=/path/to/file` loads another file.
 | `AWAY_MIN` | Minimum learned away delay (s) | `60` |
 | `AWAY_MAX` | Maximum away delay (s); longer silences are real absences | `1200` |
 | `ADAPTIVE_MARGIN` | Safety factor applied to the 95th percentile | `1.2` |
+| `ADAPTIVE_EXTRA_CHECKS` | Missed checks tolerated on top of the 95th percentile | `2` |
 | `ADAPTIVE_MIN_SAMPLES` | Silences needed before using the learned delay | `5` |
 | `STATE_FILE` | Where learned silences are stored | `tapo-watcher.state.json` |
 
@@ -249,8 +251,11 @@ away delay, learned automatically:
    `AWAY_MAX` (20 min by default), that silence is recorded in
    `tapo-watcher.state.json`. Longer silences are real absences and are ignored.
 2. Once `ADAPTIVE_MIN_SAMPLES` silences are recorded, the away delay is the
-   95th percentile of the last 200 silences × `ADAPTIVE_MARGIN`, clamped to
-   [`AWAY_MIN`, `AWAY_MAX`].
+   95th percentile of the last 200 silences × `ADAPTIVE_MARGIN`, or that
+   percentile + `ADAPTIVE_EXTRA_CHECKS` × `INTERVAL` if longer, clamped to
+   [`AWAY_MIN`, `AWAY_MAX`]. The extra checks matter for short silences: a
+   phone that usually misses one check (~65 s) gets ~125 s instead of ~78 s,
+   so missing two checks in a row does not turn the camera.
 3. Before that, `AWAY_AFTER_MISSES` × `INTERVAL` is used.
 
 The learned data survives restarts. Check it with:

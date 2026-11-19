@@ -30,7 +30,8 @@ Adaptive away delay:
   A sleeping iPhone can stay silent on the network for minutes. Every time a
   phone goes silent and then answers again (shorter than AWAY_MAX), the
   silence is recorded in STATE_FILE. The away delay of each phone is then
-  the 95th percentile of its recorded silences x ADAPTIVE_MARGIN, clamped to
+  the 95th percentile of its recorded silences x ADAPTIVE_MARGIN, or that
+  percentile + ADAPTIVE_EXTRA_CHECKS x INTERVAL if longer, clamped to
   [AWAY_MIN, AWAY_MAX]. Until ADAPTIVE_MIN_SAMPLES silences are recorded,
   AWAY_AFTER_MISSES x INTERVAL is used.
 """
@@ -166,6 +167,10 @@ AWAY_MIN = int(env("AWAY_MIN", "60"))
 # never exceeds it.
 AWAY_MAX = int(env("AWAY_MAX", "1200"))
 ADAPTIVE_MARGIN = float(env("ADAPTIVE_MARGIN", "1.2"))
+# Missed checks tolerated on top of the learned silence. Silences are
+# multiples of the check period (one missed check ~ 2 x INTERVAL), so a
+# multiplicative margin alone is too thin for short silences.
+ADAPTIVE_EXTRA_CHECKS = int(env("ADAPTIVE_EXTRA_CHECKS", "2"))
 ADAPTIVE_MIN_SAMPLES = int(env("ADAPTIVE_MIN_SAMPLES", "5"))
 ADAPTIVE_HISTORY = 200  # silences kept per phone (most recent)
 SWEEP_BATCH = 32  # pings run at once when looking for a phone's new IP
@@ -256,7 +261,8 @@ class DelayLearner:
         default = max(AWAY_MIN, AWAY_AFTER_MISSES * INTERVAL)
         if not ADAPTIVE or len(self.silences.get(key, [])) < ADAPTIVE_MIN_SAMPLES:
             return default
-        learned = self.p95(key) * ADAPTIVE_MARGIN
+        p95 = self.p95(key)
+        learned = max(p95 * ADAPTIVE_MARGIN, p95 + ADAPTIVE_EXTRA_CHECKS * INTERVAL)
         return int(min(AWAY_MAX, max(AWAY_MIN, learned)))
 
     def stats(self) -> str:

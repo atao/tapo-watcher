@@ -15,15 +15,29 @@ def test_default_delay_until_enough_samples(tp, monkeypatch):
 
 def test_learned_delay_is_p95_times_margin(tp, monkeypatch):
     monkeypatch.setattr(tp, "ADAPTIVE_MARGIN", 1.2)
+    monkeypatch.setattr(tp, "ADAPTIVE_EXTRA_CHECKS", 0)
     learner = tp.DelayLearner(tp.STATE_FILE)
     for _ in range(5):
         learner.record(KEY, 150)
     assert learner.delay(KEY) == 180
 
 
+def test_short_silences_tolerate_extra_missed_checks(tp, monkeypatch):
+    monkeypatch.setattr(tp, "INTERVAL", 30)
+    monkeypatch.setattr(tp, "ADAPTIVE_MARGIN", 1.2)
+    monkeypatch.setattr(tp, "ADAPTIVE_EXTRA_CHECKS", 2)
+    learner = tp.DelayLearner(tp.STATE_FILE)
+    for _ in range(5):
+        learner.record("short", 65)  # one missed check
+        learner.record("long", 600)
+    assert learner.delay("short") == 125  # 65 + 2 x 30, not 65 x 1.2
+    assert learner.delay("long") == 720  # margin wins for long silences
+
+
 def test_learned_delay_is_clamped(tp, monkeypatch):
     monkeypatch.setattr(tp, "AWAY_MIN", 60)
     monkeypatch.setattr(tp, "AWAY_MAX", 1200)
+    monkeypatch.setattr(tp, "ADAPTIVE_EXTRA_CHECKS", 0)
     learner = tp.DelayLearner(tp.STATE_FILE)
     for _ in range(5):
         learner.record("short", 40)
@@ -64,7 +78,7 @@ def test_state_persists_across_instances(tp):
 
     with open(tp.STATE_FILE) as fh:
         assert json.load(fh) == {"silences": {KEY: [150] * 5}}
-    assert tp.DelayLearner(tp.STATE_FILE).delay(KEY) == 180
+    assert tp.DelayLearner(tp.STATE_FILE).delay(KEY) == 210  # 150 + 2 x 30
 
 
 def test_corrupt_state_file_starts_empty(tp):
