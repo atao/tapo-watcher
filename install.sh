@@ -112,7 +112,9 @@ prompt_phones() {
         echo "Current phones: $existing"
         if confirm "Keep these phones?" y; then
             PHONES=$existing
-            return
+            # count the kept phones so the next one is numbered after them
+            n=$(($(tr -cd , <<<"$existing" | wc -c) + 2))
+            confirm "Add another phone?" n || return 0
         fi
     fi
     echo "Add the phones to watch (identified by MAC, the IP is an optional hint)."
