@@ -168,6 +168,7 @@ AWAY_MAX = int(env("AWAY_MAX", "1200"))
 ADAPTIVE_MARGIN = float(env("ADAPTIVE_MARGIN", "1.2"))
 ADAPTIVE_MIN_SAMPLES = int(env("ADAPTIVE_MIN_SAMPLES", "5"))
 ADAPTIVE_HISTORY = 200  # silences kept per phone (most recent)
+SWEEP_BATCH = 32  # pings run at once when looking for a phone's new IP
 STATE_FILE = env(
     "STATE_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "tapo-watcher.state.json"),
@@ -290,17 +291,25 @@ def ip_from_mac(mac: str) -> str:
     if ip:
         return ip
     prefixes = dict.fromkeys(cam.ip.rsplit(".", 1)[0] for cam in CAMERAS)
-    procs = [
-        subprocess.Popen(
-            ["ping", "-c", "1", "-W", "1", f"{prefix}.{i}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        for prefix in prefixes
-        for i in range(1, 255)
-    ]
-    for proc in procs:
-        proc.wait()
+    targets = [f"{prefix}.{i}" for prefix in prefixes for i in range(1, 255)]
+    # Ping in batches: 254 processes at once exceed the systemd TasksMax of
+    # small Raspberry Pis (fork fails with EAGAIN and the service crashes).
+    for start in range(0, len(targets), SWEEP_BATCH):
+        procs = []
+        for target in targets[start : start + SWEEP_BATCH]:
+            try:
+                procs.append(
+                    subprocess.Popen(
+                        ["ping", "-c", "1", "-W", "1", target],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                )
+            except OSError as exc:  # out of processes: use what is running
+                log.debug("Sweep: cannot ping %s: %s", target, exc)
+                break
+        for proc in procs:
+            proc.wait()
     return lookup()
 
 

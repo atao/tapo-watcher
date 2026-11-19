@@ -89,3 +89,36 @@ def test_ip_from_mac_sweeps_each_camera_subnet_once(tp, net, monkeypatch):
     tp.ip_from_mac(MAC)
     assert len(pinged) == 2 * 254
     assert {ip.rsplit(".", 1)[0] for ip in pinged} == {"192.168.1", "10.0.0"}
+
+
+def test_ip_from_mac_sweep_limits_concurrent_pings(tp, net, monkeypatch):
+    running, peak = [0], [0]
+
+    class Popen:
+        def __init__(self, cmd, **kwargs):
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+
+        def wait(self):
+            running[0] -= 1
+            return 0
+
+    monkeypatch.setattr(tp.subprocess, "Popen", Popen)
+    tp.ip_from_mac(MAC)
+    assert peak[0] <= tp.SWEEP_BATCH
+
+
+def test_ip_from_mac_survives_fork_failure(tp, net, monkeypatch):
+    calls = [0]
+
+    class Popen:
+        def __init__(self, cmd, **kwargs):
+            calls[0] += 1
+            if calls[0] % 10 == 0:
+                raise BlockingIOError(11, "Resource temporarily unavailable")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(tp.subprocess, "Popen", Popen)
+    assert tp.ip_from_mac(MAC) == ""
