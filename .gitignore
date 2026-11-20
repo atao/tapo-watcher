@@ -1,6 +1,7 @@
 # Secrets (camera credentials, phone MACs)
 tapo.env
 *.env
+*.env.bak
 !tapo.env.example
 
 # Python
