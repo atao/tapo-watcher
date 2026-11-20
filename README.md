@@ -107,8 +107,19 @@ Then follow it with `journalctl --user -u tapo-watcher -f`.
 **Reconfigure:** run `./install.sh` again. The current values are offered as
 defaults, the previous file is kept as `tapo.env.bak`, and advanced settings
 (`AWAY_MIN`, `AWAY_MAX`, `ADAPTIVE_MARGIN`, `ADAPTIVE_EXTRA_CHECKS`,
-`ADAPTIVE_MIN_SAMPLES`,
-`STATE_FILE`) are preserved.
+`ADAPTIVE_MIN_SAMPLES`, `STATE_FILE`) are preserved.
+
+**Update:**
+
+```bash
+./install.sh update
+```
+
+Pulls the latest version (`git pull --ff-only`, refused if tracked files were
+edited locally), lists the new commits, syncs the dependencies, rewrites the
+systemd unit if it changed, restarts the service and shows its first log
+lines. `tapo.env` and the learned delays are kept. Nothing is restarted when
+already up to date.
 
 **Uninstall:**
 
