@@ -26,6 +26,12 @@ class PresetCamera:
         self.calls.append(("deletePreset", pid))
         del self.presets[pid]
 
+    def setPreset(self, pid):
+        self.calls.append(("setPreset", pid))
+
+    def setPrivacyMode(self, enabled):
+        self.calls.append(("setPrivacyMode", enabled))
+
 
 @pytest.fixture
 def env_file(tp, monkeypatch, tmp_path):
@@ -110,3 +116,72 @@ def test_cli_needs_camera_with_several(tp, monkeypatch, fake, env_file):
     monkeypatch.setattr(tp.sys, "argv", ["tapo_watcher.py", "--save-away", "--camera", "b"])
     tp.main()
     assert fake.calls[0] == ("savePreset", "Entree")
+
+
+# ---------------------------------------------------------------- --rename-presets
+
+
+@pytest.fixture
+def phones_home(tp, monkeypatch):
+    state = {"home": True}
+    monkeypatch.setattr(tp, "any_phone_connected", lambda: state["home"])
+    return state
+
+
+def test_rename_follows_the_configured_roles(tp, fake, env_file, phones_home):
+    tp.rename_presets(cam_cfg(tp))  # home = Mur, away = Entree
+    assert fake.presets == {"3": "HOME", "4": "AWAY"}
+    assert fake.calls == [
+        ("setPrivacyMode", False),
+        ("setPreset", "1"),  # go to Mur...
+        ("savePreset", "HOME"),  # ...save it as HOME...
+        ("deletePreset", "1"),  # ...then drop Mur
+        ("setPrivacyMode", False),
+        ("setPreset", "2"),
+        ("savePreset", "AWAY"),
+        ("deletePreset", "2"),
+        ("setPreset", "3"),  # phones home: back on HOME
+    ]
+    text = env_file.read_text()
+    assert "ACTION_HOME=preset:HOME\n" in text
+    assert "ACTION_AWAY=preset:AWAY\n" in text
+
+
+def test_rename_ends_on_away_when_nobody_home(tp, fake, env_file, phones_home):
+    phones_home["home"] = False
+    tp.rename_presets(cam_cfg(tp))
+    assert fake.calls[-1] == ("setPreset", "4")  # AWAY
+
+
+def test_rename_custom_names_and_unchanged_one(tp, fake, env_file, phones_home):
+    tp.rename_presets(cam_cfg(tp), "Mur", "Porte")
+    assert fake.presets == {"1": "Mur", "3": "Porte"}
+    assert ("savePreset", "Mur") not in fake.calls  # already named: not touched
+    assert "ACTION_HOME=preset:Mur\n" in env_file.read_text()
+    assert "ACTION_AWAY=preset:Porte\n" in env_file.read_text()
+
+
+@pytest.mark.parametrize(
+    "names, message",
+    [
+        (("HOME", "home"), "different names"),
+        (("Entree", "Mur"), "Swapping"),
+        (("HO,ME", "AWAY"), "Invalid"),
+    ],
+)
+def test_rename_refusals_touch_nothing(tp, fake, env_file, phones_home, names, message):
+    with pytest.raises(SystemExit, match=message):
+        tp.rename_presets(cam_cfg(tp), *names)
+    assert fake.calls == []
+
+
+def test_rename_needs_preset_actions(tp, fake, env_file, phones_home):
+    with pytest.raises(SystemExit, match="must both be presets"):
+        tp.rename_presets(cam_cfg(tp, away="privacy:on"))
+
+
+def test_rename_cli_default_names(tp, monkeypatch, fake, env_file, phones_home):
+    monkeypatch.setattr(tp, "CAMERAS", [cam_cfg(tp)])
+    monkeypatch.setattr(tp.sys, "argv", ["tapo_watcher.py", "--rename-presets"])
+    tp.main()
+    assert sorted(fake.presets.values()) == ["AWAY", "HOME"]

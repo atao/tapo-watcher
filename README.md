@@ -268,6 +268,7 @@ uv run tapo_watcher.py --stats     # learned away delay per phone
 uv run tapo_watcher.py --dsm       # Surveillance Station Home Mode (read-only)
 uv run tapo_watcher.py --save-home # current position becomes the home preset
 uv run tapo_watcher.py --save-away # current position becomes the away preset
+uv run tapo_watcher.py --rename-presets   # home/away presets -> HOME / AWAY (camera moves)
 uv run tapo_watcher.py             # run forever (what the service does)
 ```
 
@@ -288,6 +289,19 @@ preset); presets with that name are replaced, the new one being saved before
 the old one is deleted. With a new name, `ACTION_HOME` / `ACTION_AWAY` (or
 `CAMERA_<NAME>_ACTION_*`) is rewritten in `tapo.env`: restart the service
 afterwards. A camera holds 8 presets at most.
+
+To rename the two presets without re-aiming the camera:
+
+```bash
+uv run tapo_watcher.py --rename-presets             # -> HOME and AWAY
+uv run tapo_watcher.py --rename-presets Wall,Door   # home name, away name
+```
+
+The roles come from the config: the preset `ACTION_HOME` points to gets the
+first name, the `ACTION_AWAY` one the second, and `tapo.env` is updated.
+The Tapo API has no rename, so the camera **moves** to each preset, saves it
+under the new name and deletes the old one (about 10 s each), then goes back
+to the preset matching the phones. Restart the service afterwards.
 
 ## How detection works
 

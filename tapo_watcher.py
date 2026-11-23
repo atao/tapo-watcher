@@ -30,6 +30,7 @@ Usage:
   python3 tapo_watcher.py --dsm      # show the Surveillance Station Home Mode
   python3 tapo_watcher.py --save-home [PRESET]  # current position = home preset
   python3 tapo_watcher.py --save-away [PRESET]  # current position = away preset
+  python3 tapo_watcher.py --rename-presets [HOME,AWAY]  # rename them (camera moves)
   --camera NAME                      # limit --once / --presets to one camera
 
 Adaptive away delay:
@@ -493,15 +494,7 @@ def save_position(cam: Camera, home: bool, name: str = None) -> str:
             "pick another name"
         )
 
-    tapo = camera(cam)
-    before = dict(tapo.getPresets())
-    replaced = [pid for pid, n in before.items() if n.lower() == name.lower()]
-    tapo.savePreset(name)
-    added = set(tapo.getPresets()) - set(before)
-    if not added:
-        raise RuntimeError(f"Camera {cam.name}: preset '{name}' was not saved (8 presets max?)")
-    for pid in replaced:
-        tapo.deletePreset(pid)
+    replaced, _ = store_preset(camera(cam), cam, name)
     log.info(
         "Camera %s: current position saved as %s preset '%s'%s",
         cam.name,
@@ -510,18 +503,89 @@ def save_position(cam: Camera, home: bool, name: str = None) -> str:
         f" (replaces id {', '.join(replaced)})" if replaced else "",
     )
 
-    wanted = f"preset:{name}"
-    if current.strip() != wanted:
-        key = action_key(cam, home)
-        set_env_value(key, wanted)
-        log.info(
-            "%s=%s written to %s: restart the service to use it "
-            "(systemctl --user restart tapo-watcher)",
-            key,
-            wanted,
-            ENV_FILE,
-        )
+    point_action_to(cam, home, current, name)
     return name
+
+
+def store_preset(tapo, cam: Camera, name: str, also_delete=()):
+    """Save the current position as `name`, then delete the presets already
+    called `name` and the ids in `also_delete`. Saving first means a failed
+    save loses nothing. Returns (deleted ids, new id)."""
+    before = dict(tapo.getPresets())
+    replaced = [pid for pid, n in before.items() if n.lower() == name.lower()]
+    replaced += [pid for pid in also_delete if pid in before and pid not in replaced]
+    tapo.savePreset(name)
+    added = set(tapo.getPresets()) - set(before)
+    if not added:
+        raise RuntimeError(f"Camera {cam.name}: preset '{name}' was not saved (8 presets max?)")
+    for pid in replaced:
+        tapo.deletePreset(pid)
+    return replaced, added.pop()
+
+
+def point_action_to(cam: Camera, home: bool, current_action: str, name: str):
+    """Write ACTION_HOME/AWAY=preset:<name> in tapo.env if it differs."""
+    wanted = f"preset:{name}"
+    if current_action.strip() == wanted:
+        return
+    key = action_key(cam, home)
+    set_env_value(key, wanted)
+    log.info(
+        "%s=%s written to %s: restart the service to use it "
+        "(systemctl --user restart tapo-watcher)",
+        key,
+        wanted,
+        ENV_FILE,
+    )
+
+
+PRESET_MOVE_WAIT = 10  # seconds for the motor to reach a preset
+
+
+def rename_presets(cam: Camera, home_name: str = "HOME", away_name: str = "AWAY"):
+    """Rename the home and away presets of `cam` (the ones ACTION_HOME /
+    ACTION_AWAY point to) to `home_name` / `away_name`, and update tapo.env.
+
+    The Tapo API has no rename: the camera goes to each preset, saves it
+    under the new name, then the old one is deleted. The camera MOVES, and
+    ends on the preset matching the phones (home or away)."""
+    home_name, away_name = home_name.strip(), away_name.strip()
+    for name in (home_name, away_name):
+        if not name or "," in name:
+            sys.exit(f"Invalid preset name: '{name}'")
+    if home_name.lower() == away_name.lower():
+        sys.exit("The home and away presets need different names")
+    old_home, old_away = preset_name(cam.action_home), preset_name(cam.action_away)
+    if not old_home or not old_away:
+        sys.exit(
+            f"Camera {cam.name}: ACTION_HOME and ACTION_AWAY must both be presets "
+            f"(now: {cam.action_home!r} / {cam.action_away!r})"
+        )
+    if home_name.lower() == old_away.lower() or away_name.lower() == old_home.lower():
+        sys.exit("Swapping the two names is not supported: use other names")
+
+    tapo = camera(cam)
+    new_ids = {}
+    for home, old, new in ((True, old_home, home_name), (False, old_away, away_name)):
+        old_id = find_preset_id(tapo, old)
+        if old == new:
+            new_ids[home] = old_id
+            continue
+        tapo.setPrivacyMode(False)  # privacy mode blocks motion
+        tapo.setPreset(old_id)
+        time.sleep(PRESET_MOVE_WAIT)
+        _, new_ids[home] = store_preset(tapo, cam, new, also_delete=[old_id])
+        log.info("Camera %s: preset '%s' renamed '%s' (id %s)", cam.name, old, new, new_ids[home])
+        point_action_to(cam, home, cam.action_home if home else cam.action_away, new)
+
+    present = any_phone_connected()
+    tapo.setPreset(new_ids[present])
+    log.info(
+        "Camera %s: back on the %s preset '%s'",
+        cam.name,
+        "home" if present else "away",
+        home_name if present else away_name,
+    )
 
 
 def run_action(action: str, cam: Camera = None):
@@ -716,7 +780,16 @@ def main():
             "(replacing it; PRESET = new name, default: the configured one)",
         )
     parser.add_argument(
-        "--camera", metavar="NAME", help="limit --once / --presets / --save-* to one camera"
+        "--rename-presets",
+        nargs="?",
+        const="HOME,AWAY",
+        metavar="HOME,AWAY",
+        help="rename the home and away presets (default HOME,AWAY); the camera moves",
+    )
+    parser.add_argument(
+        "--camera",
+        metavar="NAME",
+        help="limit --once / --presets / --save-* / --rename-presets to one camera",
     )
     args = parser.parse_args()
 
@@ -731,6 +804,14 @@ def main():
         for cam in cameras:
             presets = camera(cam).getPresets()
             print(f"{cam.name}: {presets}" if len(CAMERAS) > 1 else presets)
+        return
+    if args.rename_presets is not None:
+        if len(CAMERAS) > 1 and not args.camera:
+            sys.exit("Several cameras configured: add --camera NAME")
+        names = args.rename_presets.split(",")
+        if len(names) != 2:
+            sys.exit("--rename-presets expects HOME_NAME,AWAY_NAME (e.g. HOME,AWAY)")
+        rename_presets(select_cameras(args.camera)[0], *names)
         return
     if args.save_home is not None or args.save_away is not None:
         if args.save_home is not None and args.save_away is not None:
