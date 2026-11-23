@@ -226,7 +226,9 @@ schedules…) is set in Surveillance Station > Home Mode.
 DSM_URL=https://192.168.1.10:5001
 DSM_USER=tapo-watcher
 DSM_PASSWORD='change-me'
-DSM_VERIFY_SSL=0   # DSM's default certificate is self-signed
+# 0 = accept DSM's default self-signed certificate.
+# Comments must stay on their own line: "=0  # note" is read as the value.
+DSM_VERIFY_SSL=0
 ```
 
 Use a dedicated DSM account:
