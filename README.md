@@ -266,15 +266,28 @@ uv run tapo_watcher.py --presets --camera salon   # one camera only
 uv run tapo_watcher.py --once      # one check + action (add --camera NAME for one camera)
 uv run tapo_watcher.py --stats     # learned away delay per phone
 uv run tapo_watcher.py --dsm       # Surveillance Station Home Mode (read-only)
+uv run tapo_watcher.py --save-home # current position becomes the home preset
+uv run tapo_watcher.py --save-away # current position becomes the away preset
 uv run tapo_watcher.py             # run forever (what the service does)
 ```
 
-Save the current position of a camera as a preset (`tp.camera()` is the first
-camera; use `tp.camera(tp.select_cameras('salon')[0])` for another one):
+### Set the home and away positions
+
+Point the camera where you want it (Tapo app), then save that position:
 
 ```bash
-uv run python -c "import tapo_watcher as tp; print(tp.camera().savePreset('Away'))"
+uv run tapo_watcher.py --save-home          # replaces the home preset
+uv run tapo_watcher.py --save-away          # replaces the away preset
+uv run tapo_watcher.py --save-away Door     # under a new name: tapo.env follows
+uv run tapo_watcher.py --save-home --camera salon   # required with several cameras
 ```
+
+The camera does not move. The preset keeps the name already configured
+(`ACTION_HOME=preset:<name>`, or `Home` / `Away` when the action is not a
+preset); presets with that name are replaced, the new one being saved before
+the old one is deleted. With a new name, `ACTION_HOME` / `ACTION_AWAY` (or
+`CAMERA_<NAME>_ACTION_*`) is rewritten in `tapo.env`: restart the service
+afterwards. A camera holds 8 presets at most.
 
 ## How detection works
 

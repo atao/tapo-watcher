@@ -28,6 +28,8 @@ Usage:
   python3 tapo_watcher.py --presets  # list the camera presets
   python3 tapo_watcher.py --stats    # show the learned away delay per phone
   python3 tapo_watcher.py --dsm      # show the Surveillance Station Home Mode
+  python3 tapo_watcher.py --save-home [PRESET]  # current position = home preset
+  python3 tapo_watcher.py --save-away [PRESET]  # current position = away preset
   --camera NAME                      # limit --once / --presets to one camera
 
 Adaptive away delay:
@@ -82,12 +84,38 @@ def load_env_file(path):
 
 
 # tapo.env next to the script, or the file given in TAPO_ENV_FILE
-load_env_file(
-    os.environ.get(
-        "TAPO_ENV_FILE",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "tapo.env"),
-    )
+ENV_FILE = os.environ.get(
+    "TAPO_ENV_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tapo.env"),
 )
+load_env_file(ENV_FILE)
+
+
+def set_env_value(key: str, value: str, path: str = None):
+    """Set KEY=value in tapo.env (every existing KEY line, or appended),
+    atomically and keeping the file at mode 600."""
+    path = path or ENV_FILE
+    try:
+        with open(path) as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        lines = []
+    pattern = re.compile(rf"^\s*{re.escape(key)}=")
+    found = False
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            lines[i] = f"{key}={value}\n"
+            found = True
+    if not found:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{key}={value}\n")
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.writelines(lines)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 def env(name, default=None, required=False):
@@ -430,6 +458,72 @@ def find_preset_id(tapo, wanted: str) -> str:
     raise ValueError(f"Preset '{wanted}' not found. Available: {presets}")
 
 
+def action_key(cam: Camera, home: bool) -> str:
+    """tapo.env variable holding the home/away action of `cam`."""
+    suffix = "ACTION_HOME" if home else "ACTION_AWAY"
+    if not env("CAMERAS", "").strip():
+        return suffix  # single camera: plain ACTION_HOME / ACTION_AWAY
+    return f"CAMERA_{env_name(cam.name)}_{suffix}"
+
+
+def preset_name(action: str):
+    """Preset name of a preset action ("preset:Mur" -> "Mur"), else None."""
+    kind, _, arg = action.strip().partition(":")
+    return arg if kind == "preset" and arg else None
+
+
+def save_position(cam: Camera, home: bool, name: str = None) -> str:
+    """Save the camera's current position as its home (or away) preset.
+
+    The preset keeps the name configured for that state (default "Home" /
+    "Away", or `name`). Presets already called that are replaced: the new
+    one is saved first, then the old ones are deleted, so a failed save
+    loses nothing. The camera does not move. If the configured action did
+    not point to this preset, tapo.env is updated. Returns the preset name.
+    """
+    current, other = (
+        (cam.action_home, cam.action_away) if home else (cam.action_away, cam.action_home)
+    )
+    name = (name or preset_name(current) or ("Home" if home else "Away")).strip()
+    if not name or "," in name:
+        sys.exit(f"Invalid preset name: '{name}'")
+    if preset_name(other) and preset_name(other).lower() == name.lower():
+        sys.exit(
+            f"'{name}' is the {'away' if home else 'home'} preset of camera {cam.name}: "
+            "pick another name"
+        )
+
+    tapo = camera(cam)
+    before = dict(tapo.getPresets())
+    replaced = [pid for pid, n in before.items() if n.lower() == name.lower()]
+    tapo.savePreset(name)
+    added = set(tapo.getPresets()) - set(before)
+    if not added:
+        raise RuntimeError(f"Camera {cam.name}: preset '{name}' was not saved (8 presets max?)")
+    for pid in replaced:
+        tapo.deletePreset(pid)
+    log.info(
+        "Camera %s: current position saved as %s preset '%s'%s",
+        cam.name,
+        "home" if home else "away",
+        name,
+        f" (replaces id {', '.join(replaced)})" if replaced else "",
+    )
+
+    wanted = f"preset:{name}"
+    if current.strip() != wanted:
+        key = action_key(cam, home)
+        set_env_value(key, wanted)
+        log.info(
+            "%s=%s written to %s: restart the service to use it "
+            "(systemctl --user restart tapo-watcher)",
+            key,
+            wanted,
+            ENV_FILE,
+        )
+    return name
+
+
 def run_action(action: str, cam: Camera = None):
     cam = cam or CAMERAS[0]
     action = action.strip()
@@ -612,7 +706,18 @@ def main():
     parser.add_argument(
         "--dsm", action="store_true", help="show the Surveillance Station Home Mode"
     )
-    parser.add_argument("--camera", metavar="NAME", help="limit --once / --presets to one camera")
+    for state in ("home", "away"):
+        parser.add_argument(
+            f"--save-{state}",
+            nargs="?",
+            const="",
+            metavar="PRESET",
+            help=f"save the camera's current position as its {state} preset "
+            "(replacing it; PRESET = new name, default: the configured one)",
+        )
+    parser.add_argument(
+        "--camera", metavar="NAME", help="limit --once / --presets / --save-* to one camera"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -626,6 +731,14 @@ def main():
         for cam in cameras:
             presets = camera(cam).getPresets()
             print(f"{cam.name}: {presets}" if len(CAMERAS) > 1 else presets)
+        return
+    if args.save_home is not None or args.save_away is not None:
+        if args.save_home is not None and args.save_away is not None:
+            sys.exit("Use --save-home or --save-away, not both (one camera position each)")
+        if len(CAMERAS) > 1 and not args.camera:
+            sys.exit("Several cameras configured: add --camera NAME")
+        home = args.save_home is not None
+        save_position(select_cameras(args.camera)[0], home, args.save_home or args.save_away)
         return
     if args.dsm:
         if not DSM:

@@ -65,7 +65,8 @@ real `tapo.env` (use the `tp` / `net` fixtures and monkeypatch).
   stay single-quoted because they may contain `$`. DSM calls are POSTed so the
   password never appears in a URL.
 - **Physical side effects**: `--once`, the main loop, `setPreset`, `moveMotor`,
-  `savePreset` and `setPrivacyMode` act on a real camera in someone's home.
+  `savePreset` and `setPrivacyMode` act on a real camera in someone's home;
+  `--save-home` / `--save-away` replace presets and may rewrite `tapo.env`.
   `set_home_mode` / `--once` with `DSM_URL` switch Surveillance Station Home
   Mode (recording, notifications). Prefer `--check`, `--presets` and `--dsm`
   (read-only); ask before moving the camera or overwriting
