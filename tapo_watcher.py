@@ -6,6 +6,9 @@ TP-Link Tapo C210 cameras accordingly.
   - at least one phone home  -> ACTION_HOME (e.g. turn the camera to the wall)
   - all phones away          -> ACTION_AWAY (e.g. turn back to the entrance)
 
+Optionally, the Home Mode of Synology Surveillance Station follows the same
+state (on when a phone is home, off when all are away): set DSM_URL.
+
 The action only runs when the state changes, not on every check. With several
 cameras (CAMERAS=name1,name2), each camera has its own settings
 (CAMERA_<NAME>_IP, ...) and a camera whose action failed is retried alone.
@@ -24,6 +27,7 @@ Usage:
   python3 tapo_watcher.py --check    # only print whether a phone is home
   python3 tapo_watcher.py --presets  # list the camera presets
   python3 tapo_watcher.py --stats    # show the learned away delay per phone
+  python3 tapo_watcher.py --dsm      # show the Surveillance Station Home Mode
   --camera NAME                      # limit --once / --presets to one camera
 
 Adaptive away delay:
@@ -42,9 +46,13 @@ import logging
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 log = logging.getLogger("tapo-watcher")
@@ -153,8 +161,33 @@ def parse_cameras():
     return cameras
 
 
+@dataclass(frozen=True)
+class SurveillanceStation:
+    url: str  # e.g. https://192.168.1.10:5001
+    user: str
+    password: str
+    verify_ssl: bool = True
+
+
+def parse_dsm():
+    """DSM_URL / DSM_USER / DSM_PASSWORD: Synology Surveillance Station whose
+    Home Mode follows the phones. None when DSM_URL is not set."""
+    url = env("DSM_URL", "").strip().rstrip("/")
+    if not url:
+        return None
+    if not re.match(r"^https?://", url):
+        sys.exit("DSM_URL must start with http:// or https:// (e.g. https://192.168.1.10:5001)")
+    return SurveillanceStation(
+        url,
+        env("DSM_USER", required=True),
+        env("DSM_PASSWORD", required=True),
+        env("DSM_VERIFY_SSL", "1").lower() in ("1", "true", "yes", "on"),
+    )
+
+
 PHONES = parse_phones()
 CAMERAS = parse_cameras()
+DSM = parse_dsm()
 INTERVAL = int(env("INTERVAL", "30"))
 # Phones often turn Wi-Fi off while asleep: wait for several consecutive
 # failed checks before declaring them away.
@@ -425,6 +458,120 @@ def run_action(action: str, cam: Camera = None):
 
 
 # --------------------------------------------------------------------------
+# Synology Surveillance Station (optional)
+# --------------------------------------------------------------------------
+HOME_MODE_API = "SYNO.SurveillanceStation.HomeMode"
+DSM_ERRORS = {
+    100: "unknown error",
+    101: "invalid parameter",
+    102: "API not found",
+    103: "method not found",
+    104: "API version not supported",
+    105: "permission denied: give this user the Surveillance Station manager profile",
+    106: "session timeout",
+    107: "session interrupted by a duplicate login",
+    119: "invalid session",
+    400: "wrong username or password",
+    401: "account disabled",
+    402: "permission denied",
+    403: "2-step verification required: use an account without 2FA",
+    404: "2-step verification failed",
+    407: "IP address blocked after too many failed logins",
+}
+
+
+class DsmError(Exception):
+    pass
+
+
+def dsm_request(dsm: SurveillanceStation, path: str, params: dict) -> dict:
+    """POST one Web API call (form-encoded, so the password stays out of URLs
+    and logs) and return its `data`. Raises DsmError when DSM refuses it."""
+    context = None
+    if dsm.url.startswith("https://") and not dsm.verify_ssl:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    request = urllib.request.Request(
+        f"{dsm.url}/webapi/{path}", data=urllib.parse.urlencode(params).encode()
+    )
+    with urllib.request.urlopen(request, timeout=15, context=context) as response:
+        body = json.load(response)
+    if not body.get("success"):
+        code = (body.get("error") or {}).get("code")
+        reason = DSM_ERRORS.get(code, "see the Synology Web API documentation")
+        raise DsmError(f"{params['api']} {params['method']}: error {code}, {reason}")
+    return body.get("data") or {}
+
+
+@contextmanager
+def dsm_session(dsm: SurveillanceStation):
+    """Log in, yield `call(method, **params)` for the Home Mode API, log out."""
+    apis = dsm_request(
+        dsm,
+        "query.cgi",
+        {
+            "api": "SYNO.API.Info",
+            "version": "1",
+            "method": "query",
+            "query": f"SYNO.API.Auth,{HOME_MODE_API}",
+        },
+    )
+    if HOME_MODE_API not in apis:
+        raise DsmError("Surveillance Station not found: is it installed and running on the NAS?")
+    auth, home = apis["SYNO.API.Auth"], apis[HOME_MODE_API]
+    auth_base = {"api": "SYNO.API.Auth", "version": str(min(auth["maxVersion"], 6))}
+    sid = dsm_request(
+        dsm,
+        auth["path"],
+        {
+            **auth_base,
+            "method": "login",
+            "account": dsm.user,
+            "passwd": dsm.password,
+            "session": "SurveillanceStation",
+            "format": "sid",
+        },
+    )["sid"]
+
+    def call(method, **params):
+        return dsm_request(
+            dsm,
+            home["path"],
+            {
+                "api": HOME_MODE_API,
+                "version": str(max(home["minVersion"], 1)),
+                "method": method,
+                "_sid": sid,
+                **params,
+            },
+        )
+
+    try:
+        yield call
+    finally:
+        try:
+            dsm_request(
+                dsm,
+                auth["path"],
+                {**auth_base, "method": "logout", "session": "SurveillanceStation", "_sid": sid},
+            )
+        except Exception as exc:  # the session expires on its own anyway
+            log.debug("Surveillance Station logout failed: %s", exc)
+
+
+def get_home_mode(dsm: SurveillanceStation) -> bool:
+    with dsm_session(dsm) as call:
+        return bool(call("GetInfo")["on"])
+
+
+def set_home_mode(dsm: SurveillanceStation, on: bool):
+    with dsm_session(dsm) as call:
+        call("Switch", on="true" if on else "false")
+    log.info("Surveillance Station -> Home Mode %s", "ON" if on else "OFF")
+
+
+# --------------------------------------------------------------------------
 # Main loop
 # --------------------------------------------------------------------------
 def apply_camera(cam: Camera, home: bool) -> bool:
@@ -437,9 +584,22 @@ def apply_camera(cam: Camera, home: bool) -> bool:
         return False
 
 
-def apply_state(home: bool, cameras=None) -> bool:
-    """Apply the state to every camera (all are tried). True if all succeeded."""
+def apply_dsm(dsm: SurveillanceStation, home: bool) -> bool:
+    """Home Mode on when a phone is home, off when all are away. False if it failed."""
+    try:
+        set_home_mode(dsm, home)
+        return True
+    except Exception as exc:  # NAS unreachable, wrong password, missing rights...
+        log.error("Surveillance Station: Home Mode switch failed: %s", exc)
+        return False
+
+
+def apply_state(home: bool, cameras=None, dsm=None) -> bool:
+    """Apply the state to every camera and to `dsm` (all are tried).
+    True if all succeeded."""
     results = [apply_camera(cam, home) for cam in (cameras or CAMERAS)]
+    if dsm:
+        results.append(apply_dsm(dsm, home))
     return all(results)
 
 
@@ -449,6 +609,9 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--presets", action="store_true")
     parser.add_argument("--stats", action="store_true")
+    parser.add_argument(
+        "--dsm", action="store_true", help="show the Surveillance Station Home Mode"
+    )
     parser.add_argument("--camera", metavar="NAME", help="limit --once / --presets to one camera")
     args = parser.parse_args()
 
@@ -464,6 +627,11 @@ def main():
             presets = camera(cam).getPresets()
             print(f"{cam.name}: {presets}" if len(CAMERAS) > 1 else presets)
         return
+    if args.dsm:
+        if not DSM:
+            sys.exit("DSM_URL is not set")
+        print("Home Mode", "on" if get_home_mode(DSM) else "off")
+        return
     if args.check:
         present = any_phone_connected()
         print("connected" if present else "away")
@@ -471,15 +639,20 @@ def main():
     if args.once:
         present = any_phone_connected()
         log.info("Phone %s", "connected" if present else "away")
-        sys.exit(0 if apply_state(present, select_cameras(args.camera)) else 1)
+        # --camera targets one camera only: leave Surveillance Station alone
+        dsm = None if args.camera else DSM
+        sys.exit(0 if apply_state(present, select_cameras(args.camera), dsm) else 1)
 
     tapo_class()  # fail fast if pytapo is missing, not minutes later on first move
 
     state = None  # unknown at startup -> log the first state
     cam_state = {cam.name: None for cam in CAMERAS}  # last state applied per camera
+    dsm_state = None  # last Home Mode applied
     last_seen = {}  # phone key -> time.monotonic() of the last answer
     log.info("Watching %s every %ds", ", ".join(ip for ip, _ in PHONES), INTERVAL)
     log.info("Cameras: %s", ", ".join(f"{c.name} ({c.ip})" for c in CAMERAS))
+    if DSM:
+        log.info("Surveillance Station: %s (Home Mode follows the phones)", DSM.url)
     log.info("Away delay:\n%s", learner.stats())
     while True:
         now = time.monotonic()
@@ -508,6 +681,8 @@ def main():
             # are not moved again.
             if cam_state[cam.name] != present and apply_camera(cam, present):
                 cam_state[cam.name] = present
+        if DSM and dsm_state != present and apply_dsm(DSM, present):
+            dsm_state = present
 
         time.sleep(INTERVAL)
 

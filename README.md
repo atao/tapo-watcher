@@ -31,6 +31,8 @@ flowchart LR
   delay **learned per phone** to avoid false departures
   ([details](#adaptive-away-delay)).
 - **The IP follows the MAC**: a phone that gets a new DHCP lease is found again.
+- **Synology Surveillance Station** (optional): its Home Mode follows the
+  phones ([details](#synology-surveillance-station)).
 - **Moves only on change**, and a camera whose action failed is retried alone.
 - **One-command install** with an interactive script ([details](#2-easy-way-installsh)).
 
@@ -170,6 +172,10 @@ and `TAPO_ENV_FILE=/path/to/file` loads another file.
 | `ACTION_HOME` | Action when a phone is home (default for every camera) | `preset:Home` |
 | `ACTION_AWAY` | Action when all phones are away (default for every camera) | `preset:Away` |
 | `CAMERAS` | Comma-separated camera names, for several cameras (see below) | |
+| `DSM_URL` | Synology DSM address, e.g. `https://192.168.1.10:5001`; enables Surveillance Station Home Mode ([details](#synology-surveillance-station)) | |
+| `DSM_USER` | DSM account (no 2-step verification) | required with `DSM_URL` |
+| `DSM_PASSWORD` | DSM account password. Wrap in single quotes if it contains `$` | required with `DSM_URL` |
+| `DSM_VERIFY_SSL` | Check the NAS HTTPS certificate (`0` for DSM's self-signed one) | `1` |
 | `INTERVAL` | Seconds between checks | `30` |
 | `AWAY_AFTER_MISSES` | Failed checks before "away" (fixed delay, or until enough silences are learned) | `6` |
 | `ADAPTIVE_DELAY` | Learn the away delay per phone (`1`/`0`) | `1` |
@@ -209,6 +215,37 @@ Phones are checked once per loop for all cameras. Every camera is tried on
 each state change; if one fails (unreachable, wrong password…), only that one
 is retried on the next check — the others are not moved again.
 
+### Synology Surveillance Station
+
+Set `DSM_URL` to have the **Home Mode** of Surveillance Station follow the
+phones: **on** when a phone is home, **off** when all phones are away. What
+Home Mode does (stop recording, mute notifications, switch camera
+schedules…) is set in Surveillance Station > Home Mode.
+
+```bash
+DSM_URL=https://192.168.1.10:5001
+DSM_USER=tapo-watcher
+DSM_PASSWORD='change-me'
+DSM_VERIFY_SSL=0   # DSM's default certificate is self-signed
+```
+
+Use a dedicated DSM account:
+
+1. DSM > Control Panel > User: create `tapo-watcher`, **without** 2-step
+   verification (the watcher cannot type a code).
+2. Surveillance Station > Privilege Settings: give it the **manager** profile
+   (switching Home Mode needs it).
+
+Like a camera, it is only switched on state changes and retried on every
+check if it fails (NAS asleep, wrong password…). Check the connection
+without changing anything:
+
+```bash
+uv run tapo_watcher.py --dsm      # prints "Home Mode on" or "Home Mode off"
+```
+
+`--once` switches it too, except with `--camera NAME`.
+
 ### Actions
 
 | Action | Effect |
@@ -226,6 +263,7 @@ uv run tapo_watcher.py --presets   # list camera presets (every camera)
 uv run tapo_watcher.py --presets --camera salon   # one camera only
 uv run tapo_watcher.py --once      # one check + action (add --camera NAME for one camera)
 uv run tapo_watcher.py --stats     # learned away delay per phone
+uv run tapo_watcher.py --dsm       # Surveillance Station Home Mode (read-only)
 uv run tapo_watcher.py             # run forever (what the service does)
 ```
 
@@ -292,6 +330,12 @@ changing phone). Set `ADAPTIVE_DELAY=0` to always use the fixed delay.
 - **One camera out of several does not move**: the logs show
   `Camera <name>: action failed`; it is retried on every check. Test it alone
   with `uv run tapo_watcher.py --presets --camera <name>`.
+- **Surveillance Station Home Mode does not switch**: the logs show
+  `Surveillance Station: Home Mode switch failed: <reason>`. Error 400 = wrong
+  username or password, 403 = the account has 2-step verification, 105 = the
+  account lacks the Surveillance Station manager profile, `CERTIFICATE_VERIFY_FAILED`
+  = set `DSM_VERIFY_SSL=0` (self-signed certificate). Test with
+  `uv run tapo_watcher.py --dsm`.
 
 ## Development
 

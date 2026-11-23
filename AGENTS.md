@@ -60,12 +60,15 @@ real `tapo.env` (use the `tp` / `net` fixtures and monkeypatch).
 
 ## Rules
 
-- **Secrets**: never print, log, or commit `CAMERA_PASSWORD` or the contents of
-  `tapo.env`. Keep `tapo.env` at mode `600`. `CAMERA_PASSWORD` must stay
-  single-quoted because it may contain `$`.
+- **Secrets**: never print, log, or commit `CAMERA_PASSWORD`, `DSM_PASSWORD`
+  or the contents of `tapo.env`. Keep `tapo.env` at mode `600`. Passwords must
+  stay single-quoted because they may contain `$`. DSM calls are POSTed so the
+  password never appears in a URL.
 - **Physical side effects**: `--once`, the main loop, `setPreset`, `moveMotor`,
   `savePreset` and `setPrivacyMode` act on a real camera in someone's home.
-  Prefer `--check` and `--presets`; ask before moving the camera or overwriting
+  `set_home_mode` / `--once` with `DSM_URL` switch Surveillance Station Home
+  Mode (recording, notifications). Prefer `--check`, `--presets` and `--dsm`
+  (read-only); ask before moving the camera or overwriting
   presets.
 - **Network**: detection must stay passive-ish (UDP 5353 poke, ping, ARP read).
   Do not add scans beyond the cameras' /24 or anything requiring root.

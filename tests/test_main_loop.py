@@ -116,3 +116,21 @@ def test_failed_camera_is_retried_alone(tp, monkeypatch):
     ]
     moves = run_loop(tp, monkeypatch, [True, True, True], fail_actions={"garden": 1}, cameras=cams)
     assert moves == [(0, "salon", "HOME"), (30, "garden", "HOME")]
+
+
+def test_dsm_home_mode_follows_state_and_is_retried(tp, monkeypatch):
+    switches, failures = [], [1]
+
+    def apply_dsm(dsm, home):
+        if failures[0]:
+            failures[0] -= 1
+            return False
+        switches.append(home)
+        return True
+
+    monkeypatch.setattr(tp, "DSM", tp.SurveillanceStation("https://nas:5001", "u", "p"))
+    monkeypatch.setattr(tp, "apply_dsm", apply_dsm)
+    moves = run_loop(tp, monkeypatch, [True, True, True, False, False, False, False])
+    assert moves == [(0, "HOME"), (120, "AWAY")]
+    # first switch failed, retried on the next check, not repeated after that
+    assert switches == [True, False]
